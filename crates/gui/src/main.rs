@@ -38,10 +38,12 @@ const CONTROLLER_SECRET: &str = "ss-rs-local-traffic";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MIHOMO_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mihomo.exe"));
 const WINTUN_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/wintun.dll"));
+const GEOIP_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/geoip.dat"));
+const GEOSITE_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/geosite.dat"));
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "SS-RS",
+        "Sam's Tunnel4Vmess",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([430.0, 410.0])
@@ -157,6 +159,12 @@ struct TunnelApp {
     last_totals: Option<(u64, u64)>,
     last_save: Instant,
     proxy_backup: Option<ProxyBackup>,
+    retry_count: u32,
+    retry_at: Option<Instant>,
+    auto_start: bool,
+    exe_path: PathBuf,
+    latency_ms: Option<u64>,
+    last_latency_check: Option<Instant>,
 }
 
 impl TunnelApp {
@@ -167,6 +175,8 @@ impl TunnelApp {
             .unwrap_or_else(std::env::temp_dir)
             .join("SS-RS");
         let traffic_path = runtime_dir.join("traffic.txt");
+        let auto_start = check_auto_start();
+        let exe_path = std::env::current_exe().unwrap_or_default();
         Self {
             state: ConnectionState::Disconnected,
             logs: VecDeque::from(["等待连接…".to_owned()]),
@@ -178,11 +188,19 @@ impl TunnelApp {
             last_totals: None,
             last_save: Instant::now(),
             proxy_backup: None,
+            retry_count: 0,
+            retry_at: None,
+            auto_start,
+            exe_path,
+            latency_ms: None,
+            last_latency_check: None,
         }
     }
 
     fn connect(&mut self) {
         self.error = None;
+        self.retry_count = 0;
+        self.retry_at = None;
         let (engine, config) = match prepare_runtime(&self.runtime_dir) {
             Ok(value) => value,
             Err(error) => {
@@ -207,14 +225,19 @@ impl TunnelApp {
         self.state = ConnectionState::Connecting;
         self.last_totals = None;
         self.logs.clear();
-        self.push_log("正在建立 XHTTP 隧道…".into());
+        self.push_log("正在建立隧道…".into());
     }
 
     fn disconnect(&mut self) {
+        self.retry_at = None;
+        self.retry_count = 0;
         if let Some(worker) = &self.worker {
             let _ = worker.commands.send(WorkerCommand::Stop);
             self.state = ConnectionState::Disconnecting;
             self.push_log("正在恢复网络…".into());
+        } else {
+            self.state = ConnectionState::Disconnected;
+            self.restore_proxy();
         }
     }
 
@@ -232,7 +255,7 @@ impl TunnelApp {
                     self.error = None;
                     self.push_log("隧道创建成功".into());
                     self.push_log(format!("连接：{SERVER}:{PORT} · TLS/{SNI}"));
-                    self.push_log("流量已加密并通过 Cloudflare CDN 转发".into());
+                    self.push_log("已加密并通过 CDN 转发".into());
                 }
                 WorkerEvent::Traffic { upload, download } => self.record_traffic(upload, download),
                 WorkerEvent::Exited { expected } => {
@@ -240,9 +263,22 @@ impl TunnelApp {
                     self.restore_proxy();
                     if expected {
                         self.state = ConnectionState::Disconnected;
+                        self.retry_count = 0;
+                        self.retry_at = None;
                         self.push_log("隧道已断开".into());
+                    } else if self.retry_count < 5 {
+                        self.retry_count += 1;
+                        self.state = ConnectionState::Connecting;
+                        let delay = 1u64 << (self.retry_count - 1);
+                        self.retry_at = Some(Instant::now() + Duration::from_secs(delay));
+                        self.push_log(format!(
+                            "核心退出，{}/5 次重试，{}秒后…",
+                            self.retry_count, delay
+                        ));
                     } else {
-                        self.fail("代理核心意外退出".into());
+                        self.retry_count = 0;
+                        self.retry_at = None;
+                        self.fail("代理核心多次退出，已停止重试".into());
                     }
                 }
                 WorkerEvent::Failed(message) => {
@@ -275,8 +311,8 @@ impl TunnelApp {
 
     fn push_log(&mut self, line: String) {
         if !line.trim().is_empty() {
-            self.logs.push_back(line);
-            while self.logs.len() > 4 {
+            self.logs.push_back(format!("{}{line}", timestamp_prefix()));
+            while self.logs.len() > 200 {
                 self.logs.pop_front();
             }
         }
@@ -301,6 +337,21 @@ impl TunnelApp {
 impl eframe::App for TunnelApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_worker();
+        if let Some(at) = self.retry_at {
+            if Instant::now() >= at {
+                self.retry_at = None;
+                self.connect();
+            }
+        }
+        if self.state == ConnectionState::Connected {
+            let now = Instant::now();
+            if self.last_latency_check.map_or(true, |t| now.duration_since(t) > Duration::from_secs(3)) {
+                self.last_latency_check = Some(now);
+                self.latency_ms = measure_latency(SERVER, PORT);
+            }
+        } else {
+            self.latency_ms = None;
+        }
         self.traffic.roll_periods();
         context.request_repaint_after(Duration::from_millis(200));
     }
@@ -314,18 +365,25 @@ impl eframe::App for TunnelApp {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(
-                            RichText::new("SS / RS")
+                            RichText::new("Sam's Tunnel4Vmess")
                                 .size(23.0)
                                 .strong()
                                 .extra_letter_spacing(2.0),
                         );
                         ui.label(
-                            RichText::new("XHTTP CDN TUNNEL")
+                            RichText::new("CDN XHTTP")
                                 .size(10.0)
                                 .color(Color32::from_rgb(119, 113, 104)),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                        if let Some(ms) = self.latency_ms {
+                            ui.label(
+                                RichText::new(format!("{ms}ms"))
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(80, 122, 84)),
+                            );
+                        }
                         let (label, color) = status(self.state);
                         ui.label(RichText::new(label).size(12.0).color(color));
                     });
@@ -341,7 +399,14 @@ impl eframe::App for TunnelApp {
                         detail(ui, "TLS", SNI);
                         detail(ui, "MODE", "全局 TUN");
                     });
-                ui.add_space(12.0);
+                ui.add_space(6.0);
+                if ui
+                    .checkbox(&mut self.auto_start, "开机自动启动")
+                    .changed()
+                {
+                    set_auto_start(&self.exe_path, self.auto_start);
+                }
+                ui.add_space(10.0);
                 let card_width = ((ui.available_width() - 10.0) / 2.0).max(0.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
@@ -349,21 +414,25 @@ impl eframe::App for TunnelApp {
                     traffic_card(ui, "本月", self.traffic.month_bytes, card_width);
                 });
                 ui.add_space(12.0);
-                let log_height = (ui.available_height() - 75.0).clamp(72.0, 140.0);
+                let log_height = (ui.available_height() - 95.0).clamp(72.0, 140.0);
                 egui::Frame::new()
                     .fill(Color32::from_rgb(242, 238, 228))
                     .stroke(Stroke::new(1.0, Color32::from_rgb(195, 189, 178)))
                     .inner_margin(10.0)
                     .show(ui, |ui| {
                         ui.set_min_height(log_height);
-                        for line in &self.logs {
-                            ui.label(
-                                RichText::new(line)
-                                    .monospace()
-                                    .size(10.5)
-                                    .color(Color32::from_rgb(80, 76, 70)),
-                            );
-                        }
+                        egui::ScrollArea::vertical()
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for line in &self.logs {
+                                    ui.label(
+                                        RichText::new(line)
+                                            .monospace()
+                                            .size(10.5)
+                                            .color(Color32::from_rgb(80, 76, 70)),
+                                    );
+                                }
+                            });
                     });
                 if let Some(error) = &self.error {
                     ui.label(
@@ -408,6 +477,8 @@ fn prepare_runtime(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
         || XHTTP_PATH.is_empty()
         || MIHOMO_BYTES.is_empty()
         || WINTUN_BYTES.is_empty()
+        || GEOIP_BYTES.is_empty()
+        || GEOSITE_BYTES.is_empty()
     {
         return Err("客户端构建不完整".into());
     }
@@ -416,8 +487,12 @@ fn prepare_runtime(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
     let wintun = dir.join("wintun.dll");
     write_embedded(&engine, MIHOMO_BYTES)?;
     write_embedded(&wintun, WINTUN_BYTES)?;
+    write_embedded(&dir.join("geoip.dat"), GEOIP_BYTES)?;
+    write_embedded(&dir.join("geosite.dat"), GEOSITE_BYTES)?;
+    let geodata_dir = dir.to_string_lossy().replace('\\', "/");
     let config = dir.join("config.yaml");
-    fs::write(&config, mihomo_config()).map_err(|e| format!("无法写入配置：{e}"))?;
+    fs::write(&config, mihomo_config(&geodata_dir))
+        .map_err(|e| format!("无法写入配置：{e}"))?;
     Ok((engine, config))
 }
 
@@ -428,7 +503,7 @@ fn write_embedded(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn mihomo_config() -> String {
+fn mihomo_config(geodata_dir: &str) -> String {
     format!(
         r#"mixed-port: 39080
 allow-lan: false
@@ -437,6 +512,10 @@ log-level: info
 ipv6: false
 external-controller: 127.0.0.1:39097
 secret: {secret}
+geodata-loader: memconservative
+geox-url:
+  geoip: "file://{geodata_dir}/geoip.dat"
+  geosite: "file://{geodata_dir}/geosite.dat"
 tun:
   enable: true
   stack: gvisor
@@ -449,9 +528,18 @@ dns:
   enable: true
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - +.lan
+    - localhost.ptlogin2.qq.com
   nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  fallback:
     - 1.1.1.1
     - 8.8.8.8
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
 proxies:
   - name: SamsT4vless-CDN
     type: vless
@@ -481,9 +569,13 @@ proxy-groups:
     proxies:
       - SamsT4vless-CDN
 rules:
+  - GEOSITE,category-ads-all,REJECT
+  - GEOSITE,cn,DIRECT
+  - GEOIP,cn,DIRECT
   - MATCH,PROXY
 "#,
         secret = CONTROLLER_SECRET,
+        geodata_dir = geodata_dir,
         server = SERVER,
         port = PORT,
         uuid = UUID,
@@ -701,6 +793,22 @@ struct NativeSystemTime {
 }
 
 #[cfg(windows)]
+fn timestamp_prefix() -> String {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLocalTime(value: *mut NativeSystemTime);
+    }
+    let mut st = NativeSystemTime::default();
+    unsafe { GetLocalTime(&mut st) };
+    format!("[{:02}:{:02}:{:02}] ", st.hour, st.minute, st.second)
+}
+
+#[cfg(not(windows))]
+fn timestamp_prefix() -> String {
+    String::new()
+}
+
+#[cfg(windows)]
 fn period_keys() -> (String, String) {
     #[link(name = "kernel32")]
     extern "system" {
@@ -868,6 +976,79 @@ fn sketch_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Respons
     response
 }
 
+fn check_auto_start() -> bool {
+    #[cfg(windows)]
+    {
+        let output = hidden_command("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "SS-RS",
+            ])
+            .output()
+            .ok();
+        if let Some(out) = output {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                return text.contains("SS-RS");
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = ();
+    }
+    false
+}
+
+fn set_auto_start(exe_path: &Path, enable: bool) {
+    #[cfg(windows)]
+    {
+        if enable {
+            let _ = hidden_command("reg")
+                .args([
+                    "add",
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                    "/v",
+                    "SS-RS",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &exe_path.to_string_lossy(),
+                    "/f",
+                ])
+                .status();
+        } else {
+            let _ = hidden_command("reg")
+                .args([
+                    "delete",
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                    "/v",
+                    "SS-RS",
+                    "/f",
+                ])
+                .status();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (exe_path, enable);
+    }
+}
+
+fn measure_latency(server: &str, port: &str) -> Option<u64> {
+    use std::net::TcpStream;
+    let addr = format!("{server}:{port}");
+    let start = Instant::now();
+    TcpStream::connect_timeout(
+        &addr.parse().ok()?,
+        Duration::from_secs(3),
+    )
+    .ok()?;
+    Some(start.elapsed().as_millis() as u64)
+}
+
 fn button_offsets(hovered: bool, pressed: bool) -> (f32, f32) {
     if pressed {
         (3.0, 4.0)
@@ -922,7 +1103,7 @@ mod tests {
         let engine = dir.join("mihomo.exe");
         let config = dir.join("config.yaml");
         fs::write(&engine, MIHOMO_BYTES).unwrap();
-        fs::write(&config, mihomo_config()).unwrap();
+        fs::write(&config, mihomo_config(".")).unwrap();
         let status = Command::new(&engine)
             .args(["-t", "-f", config.to_str().unwrap()])
             .status()
@@ -945,7 +1126,7 @@ mod tests {
         fs::write(&engine, MIHOMO_BYTES).unwrap();
         fs::write(
             &config,
-            mihomo_config().replacen("  enable: true", "  enable: false", 1),
+            mihomo_config(".").replacen("  enable: true", "  enable: false", 1),
         )
         .unwrap();
         let mut child = Command::new(&engine)

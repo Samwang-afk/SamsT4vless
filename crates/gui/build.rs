@@ -1,6 +1,7 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=SS_RS_MIHOMO_PATH");
     println!("cargo:rerun-if-env-changed=SS_RS_WINTUN_PATH");
+    println!("cargo:rerun-if-env-changed=SS_RS_GEODATA_DIR");
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     for (name, variable) in [
         ("mihomo.exe", "SS_RS_MIHOMO_PATH"),
@@ -12,12 +13,27 @@ fn main() {
             .unwrap_or_default();
         std::fs::write(out.join(name), bytes).unwrap();
     }
+    let geodata_dir = std::env::var("SS_RS_GEODATA_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut p = std::path::PathBuf::from(
+                std::env::var("CARGO_MANIFEST_DIR").unwrap(),
+            );
+            p.pop();
+            p.pop();
+            p.join("target").join("tools").join("xray-26.6.27")
+        });
+    for file in ["geoip.dat", "geosite.dat"] {
+        let bytes = std::fs::read(geodata_dir.join(file)).unwrap_or_default();
+        std::fs::write(out.join(file), bytes).unwrap();
+    }
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut resource = winresource::WindowsResource::new();
         resource
-            .set("ProductName", "SS-RS")
-            .set("FileDescription", "SS-RS Global Encrypted Tunnel");
+            .set("ProductName", "Sam's Tunnel4Vmess")
+            .set("FileDescription", "Sam's Tunnel4Vmess Global Encrypted Tunnel");
         if std::env::var("PROFILE").as_deref() == Ok("release") {
             resource.set_manifest(
                 r#"
