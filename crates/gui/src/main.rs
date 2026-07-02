@@ -38,7 +38,7 @@ const CONTROLLER_SECRET: &str = "ss-rs-local-traffic";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MIHOMO_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mihomo.exe"));
 const WINTUN_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/wintun.dll"));
-const GEOIP_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/geoip.dat"));
+const GEOIP_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/GeoIP.dat"));
 const GEOSITE_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/geosite.dat"));
 
 fn main() -> eframe::Result {
@@ -487,11 +487,10 @@ fn prepare_runtime(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
     let wintun = dir.join("wintun.dll");
     write_embedded(&engine, MIHOMO_BYTES)?;
     write_embedded(&wintun, WINTUN_BYTES)?;
-    write_embedded(&dir.join("geoip.dat"), GEOIP_BYTES)?;
+    write_embedded(&dir.join("GeoIP.dat"), GEOIP_BYTES)?;
     write_embedded(&dir.join("geosite.dat"), GEOSITE_BYTES)?;
-    let geodata_dir = dir.to_string_lossy().replace('\\', "/");
     let config = dir.join("config.yaml");
-    fs::write(&config, mihomo_config(&geodata_dir))
+    fs::write(&config, mihomo_config())
         .map_err(|e| format!("无法写入配置：{e}"))?;
     Ok((engine, config))
 }
@@ -503,7 +502,7 @@ fn write_embedded(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn mihomo_config(geodata_dir: &str) -> String {
+fn mihomo_config() -> String {
     format!(
         r#"mixed-port: 39080
 allow-lan: false
@@ -512,10 +511,8 @@ log-level: info
 ipv6: false
 external-controller: 127.0.0.1:39097
 secret: {secret}
+geodata-mode: true
 geodata-loader: memconservative
-geox-url:
-  geoip: "file://{geodata_dir}/geoip.dat"
-  geosite: "file://{geodata_dir}/geosite.dat"
 tun:
   enable: true
   stack: gvisor
@@ -575,7 +572,6 @@ rules:
   - MATCH,PROXY
 "#,
         secret = CONTROLLER_SECRET,
-        geodata_dir = geodata_dir,
         server = SERVER,
         port = PORT,
         uuid = UUID,
@@ -590,8 +586,9 @@ fn run_worker(
     commands: Receiver<WorkerCommand>,
     events: Sender<WorkerEvent>,
 ) {
-    let mut command = Command::new(engine);
+    let mut command = Command::new(&engine);
     command
+        .current_dir(config.parent().unwrap())
         .args(["-f", config.to_string_lossy().as_ref()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1103,11 +1100,13 @@ mod tests {
         let engine = dir.join("mihomo.exe");
         let config = dir.join("config.yaml");
         fs::write(&engine, MIHOMO_BYTES).unwrap();
-        fs::write(&config, mihomo_config(".")).unwrap();
-        let status = Command::new(&engine)
-            .args(["-t", "-f", config.to_str().unwrap()])
-            .status()
-            .unwrap();
+        fs::write(&dir.join("GeoIP.dat"), GEOIP_BYTES).unwrap();
+        fs::write(&dir.join("geosite.dat"), GEOSITE_BYTES).unwrap();
+        fs::write(&config, mihomo_config()).unwrap();
+        let mut cmd = Command::new(&engine);
+        cmd.current_dir(&dir)
+            .args(["-t", "-f", config.to_str().unwrap()]);
+        let status = cmd.status().unwrap();
         let _ = fs::remove_dir_all(&dir);
         assert!(status.success());
     }
@@ -1124,12 +1123,15 @@ mod tests {
         let engine = dir.join("mihomo.exe");
         let config = dir.join("config.yaml");
         fs::write(&engine, MIHOMO_BYTES).unwrap();
+        fs::write(&dir.join("GeoIP.dat"), GEOIP_BYTES).unwrap();
+        fs::write(&dir.join("geosite.dat"), GEOSITE_BYTES).unwrap();
         fs::write(
             &config,
-            mihomo_config(".").replacen("  enable: true", "  enable: false", 1),
+            mihomo_config().replacen("  enable: true", "  enable: false", 1),
         )
         .unwrap();
         let mut child = Command::new(&engine)
+            .current_dir(&dir)
             .args(["-f", config.to_str().unwrap()])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

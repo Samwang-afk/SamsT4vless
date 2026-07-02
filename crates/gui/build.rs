@@ -24,7 +24,7 @@ fn main() {
             p.pop();
             p.join("target").join("tools").join("xray-26.6.27")
         });
-    for file in ["geoip.dat", "geosite.dat"] {
+    for file in ["GeoIP.dat", "geosite.dat"] {
         let bytes = std::fs::read(geodata_dir.join(file)).unwrap_or_default();
         std::fs::write(out.join(file), bytes).unwrap();
     }
