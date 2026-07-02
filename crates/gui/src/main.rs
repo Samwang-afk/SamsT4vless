@@ -936,6 +936,7 @@ mod tests {
         if std::env::var_os("SS_RS_LIVE_TEST").is_none() {
             return;
         }
+        assert!(!MIHOMO_BYTES.is_empty(), "Mihomo core was not embedded");
         let dir = std::env::temp_dir().join("ss-rs-live-test");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -971,6 +972,22 @@ mod tests {
             ])
             .output()
             .unwrap();
+        let transfer = Command::new("curl.exe")
+            .args([
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "30",
+                "--proxy",
+                "http://127.0.0.1:39080",
+                "--output",
+                "NUL",
+                "--write-out",
+                "%{size_download}",
+                "https://speed.cloudflare.com/__down?bytes=1048576",
+            ])
+            .output()
+            .unwrap();
         let totals = fetch_totals();
         let _ = child.kill();
         let logs = child.wait_with_output().unwrap();
@@ -987,6 +1004,8 @@ mod tests {
         } else {
             assert!(!String::from_utf8_lossy(&output.stdout).trim().is_empty());
         }
+        assert!(transfer.status.success());
+        assert_eq!(String::from_utf8_lossy(&transfer.stdout).trim(), "1048576");
         assert!(totals.is_some_and(|(up, down)| up + down > 0));
     }
 }
