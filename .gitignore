@@ -1,0 +1,8 @@
+.ss-password.dat
+ss-tun.log
+.superpowers/
+dist/
+target/
+PROJECT_PROMPT.txt
+deploy/
+docs/superpowers/specs/
