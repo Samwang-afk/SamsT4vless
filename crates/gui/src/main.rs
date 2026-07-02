@@ -43,7 +43,7 @@ const GEOSITE_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/geosite.d
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "Sam's Tunnel4Vmess",
+        "Sam's Tunnel4Vless",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([430.0, 410.0])
@@ -365,7 +365,7 @@ impl eframe::App for TunnelApp {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(
-                            RichText::new("Sam's Tunnel4Vmess")
+                            RichText::new("Sam's Tunnel4Vless")
                                 .size(23.0)
                                 .strong()
                                 .extra_letter_spacing(2.0),

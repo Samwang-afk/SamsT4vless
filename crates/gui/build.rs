@@ -32,8 +32,8 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut resource = winresource::WindowsResource::new();
         resource
-            .set("ProductName", "Sam's Tunnel4Vmess")
-            .set("FileDescription", "Sam's Tunnel4Vmess Global Encrypted Tunnel");
+            .set("ProductName", "Sam's Tunnel4Vless")
+            .set("FileDescription", "Sam's Tunnel4Vless Global Encrypted Tunnel");
         if std::env::var("PROFILE").as_deref() == Ok("release") {
             resource.set_manifest(
                 r#"
