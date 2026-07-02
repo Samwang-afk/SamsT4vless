@@ -46,8 +46,8 @@ fn main() -> eframe::Result {
         "Sam's Tunnel4Vless",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([430.0, 410.0])
-                .with_min_inner_size([390.0, 390.0])
+                .with_inner_size([440.0, 440.0])
+                .with_min_inner_size([400.0, 400.0])
                 .with_resizable(true),
             centered: true,
             persist_window: false,
